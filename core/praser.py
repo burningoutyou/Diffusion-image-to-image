@@ -134,23 +134,7 @@ def parse(args):
     opt['path']['experiments_root'] = experiments_root
     for key, path in opt['path'].items():
         if 'resume' not in key and 'base' not in key and 'root' not in key:
-            if key == 'checkpoint':
-                if os.path.isabs(path):
-                    opt['path'][key] = path
-                else:
-                    norm = path.replace('\\', '/').rstrip('/')
-                    # Save weights outside experiments/ (paths relative to cwd / project root)
-                    _ext_roots = ('new_pt_model', 'pt_model/new_pt_model')
-                    use_project_root = any(
-                        norm == p or norm.startswith(p + '/')
-                        for p in _ext_roots
-                    )
-                    if use_project_root:
-                        opt['path'][key] = os.path.abspath(path)
-                    else:
-                        opt['path'][key] = os.path.join(experiments_root, path)
-            else:
-                opt['path'][key] = os.path.join(experiments_root, path)
+            opt['path'][key] = os.path.join(experiments_root, path)
             mkdirs(opt['path'][key])
 
     ''' debug mode '''

@@ -9,7 +9,7 @@
         "code": "code",
         "tb_logger": "tb_logger",
         "results": "results",
-        "checkpoint": "pt_model/new_pt_model",
+        "checkpoint": "D:/xjw/project/Image to Image Diffusion Model/Palette-Image-to-Image-Diffusion-Models-main/pt_model/new_pt_model",
         "resume_state": null
     },
 

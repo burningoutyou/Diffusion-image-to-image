@@ -7,7 +7,6 @@ datasets/*
 *.pt
 *.pth
 pt_model/
-new_pt_model/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
