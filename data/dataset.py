@@ -2,6 +2,7 @@ import torch.utils.data as data
 from torchvision import transforms
 from PIL import Image
 import os
+import re
 import torch
 import numpy as np
 
@@ -177,4 +178,67 @@ class ColorizationDataset(data.Dataset):
     def __len__(self):
         return len(self.flist)
 
+
+class LayoutCondPairDataset(data.Dataset):
+    """
+    Pairs layout images with boundary-condition images named ``{base}_cond{ext}``.
+
+    - ``{base}.png`` (or .jpg, etc.): ground-truth **layout** -> ``gt_image``
+    - ``{base}_cond.png``: **scope / boundary** condition -> ``cond_image``
+
+    Only pairs where both files exist are used. Files ending with ``*_cond.*``
+    that have no matching layout are skipped; standalone layout files without
+    a ``_cond`` partner are ignored (to avoid duplicates).
+    """
+
+    def __init__(self, data_root, cond_suffix='_cond', data_len=-1, image_size=[256, 256], loader=pil_loader):
+        assert os.path.isdir(data_root), '%s is not a valid directory' % data_root
+        self.data_root = data_root
+        self.cond_suffix = cond_suffix if str(cond_suffix).startswith('_') else '_' + str(cond_suffix)
+        self.loader = loader
+        self.image_size = image_size
+        self.tfs = transforms.Compose([
+            transforms.Resize((image_size[0], image_size[1])),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        ])
+        self.pairs = self._collect_pairs(data_root, self.cond_suffix)
+        if len(self.pairs) == 0:
+            raise RuntimeError(
+                'LayoutCondPairDataset: no valid pairs in "{}". '
+                'Expected "name.ext" (layout) and "name{}ext" (boundary).'.format(data_root, self.cond_suffix)
+            )
+        if data_len > 0:
+            self.pairs = self.pairs[:int(data_len)]
+
+    @staticmethod
+    def _collect_pairs(root, cond_suffix):
+        pat = re.compile(r'^(.+)' + re.escape(cond_suffix) + r'(\.[^.]+)$', re.IGNORECASE)
+        pairs = []
+        for dirpath, _, fnames in sorted(os.walk(root)):
+            for fname in sorted(fnames):
+                if not is_image_file(fname):
+                    continue
+                m = pat.match(fname)
+                if not m:
+                    continue
+                base, ext = m.group(1), m.group(2)
+                cond_path = os.path.join(dirpath, fname)
+                layout_name = base + ext
+                layout_path = os.path.join(dirpath, layout_name)
+                if os.path.isfile(layout_path):
+                    pairs.append((layout_path, cond_path))
+        pairs.sort(key=lambda x: x[0])
+        return pairs
+
+    def __getitem__(self, index):
+        layout_path, cond_path = self.pairs[index]
+        ret = {}
+        ret['gt_image'] = self.tfs(self.loader(layout_path))
+        ret['cond_image'] = self.tfs(self.loader(cond_path))
+        ret['path'] = os.path.basename(layout_path)
+        return ret
+
+    def __len__(self):
+        return len(self.pairs)
 
