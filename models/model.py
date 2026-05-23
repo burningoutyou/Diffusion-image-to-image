@@ -1,5 +1,10 @@
+import csv
+import os
+import cv2
+import numpy as np
 import torch
 import tqdm
+from PIL import Image
 from core.base_model import BaseModel
 from core.logger import LogTracker
 import copy
@@ -60,6 +65,7 @@ class Palette(BaseModel):
         ''' must use set_device in tensor '''
         self.cond_image = self.set_device(data.get('cond_image'))
         self.gt_image = self.set_device(data.get('gt_image'))
+        self.range_mask = self.set_device(data.get('range_mask'))
         self.mask = self.set_device(data.get('mask'))
         self.mask_image = data.get('mask_image')
         self.path = data['path']
@@ -101,6 +107,139 @@ class Palette(BaseModel):
         self.results_dict = self.results_dict._replace(name=ret_path, result=ret_result)
         return self.results_dict._asdict()
 
+    @staticmethod
+    def _to_01(tensor):
+        tensor = tensor.detach().float().cpu()
+        if tensor.numel() > 0 and float(tensor.min()) < 0.0:
+            tensor = (tensor + 1.0) / 2.0
+        return tensor.clamp(0.0, 1.0)
+
+    @staticmethod
+    def _save_gray(array, path):
+        array = np.clip(array, 0.0, 1.0)
+        Image.fromarray((array * 255.0).astype(np.uint8)).save(path)
+
+    @staticmethod
+    def _component_stats(binary, min_area=10):
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(
+            binary.astype(np.uint8), connectivity=8
+        )
+        areas = [
+            int(stats[label, cv2.CC_STAT_AREA])
+            for label in range(1, num_labels)
+            if int(stats[label, cv2.CC_STAT_AREA]) >= min_area
+        ]
+        if not areas:
+            return 0, 0.0
+        return len(areas), float(np.mean(areas))
+
+    @staticmethod
+    def _dice_iou(pred, gt):
+        pred = pred.astype(bool)
+        gt = gt.astype(bool)
+        intersection = np.logical_and(pred, gt).sum()
+        pred_sum = pred.sum()
+        gt_sum = gt.sum()
+        union = np.logical_or(pred, gt).sum()
+        dice_den = pred_sum + gt_sum
+        dice = 1.0 if dice_den == 0 else float(2.0 * intersection / dice_den)
+        iou = 1.0 if union == 0 else float(intersection / union)
+        return dice, iou
+
+    def _get_range_mask_batch(self):
+        if self.range_mask is not None:
+            return self._to_01(self.range_mask)
+        return ((self.cond_image.detach().float().cpu()[:, 0:1] + 1.0) / 2.0).clamp(0.0, 1.0)
+
+    def _save_layout_eval_outputs(self, phase):
+        if self.opt['global_rank'] != 0:
+            return []
+
+        result_root = os.path.join(self.opt['path']['results'], phase, str(self.epoch))
+        eval_root = os.path.join(result_root, 'layout_eval')
+        os.makedirs(eval_root, exist_ok=True)
+
+        pred_batch = self._to_01(self.output)
+        gt_batch = self._to_01(self.gt_image)
+        range_batch = self._get_range_mask_batch()
+        thresholds = [0.5, 0.6, 0.7]
+        rows = []
+
+        for idx in range(self.batch_size):
+            name = os.path.basename(self.path[idx])
+            stem, _ = os.path.splitext(name)
+            sample_dir = os.path.join(eval_root, stem)
+            os.makedirs(sample_dir, exist_ok=True)
+
+            pred01 = pred_batch[idx, 0].numpy()
+            gt01 = gt_batch[idx, 0].numpy()
+            range01 = range_batch[idx, 0].numpy()
+            gt_bin = (gt01 > 0.5).astype(np.uint8)
+            range_bin = (range01 > 0.5).astype(np.uint8)
+            range_pixels = max(float(range_bin.sum()), 1.0)
+
+            self._save_gray(pred01, os.path.join(sample_dir, 'raw_output.png'))
+            self._save_gray(gt_bin.astype(np.float32), os.path.join(sample_dir, 'gt.png'))
+            self._save_gray(range_bin.astype(np.float32), os.path.join(sample_dir, 'range_mask.png'))
+
+            row = {
+                'path': name,
+                'GT_BCR': float((gt_bin * range_bin).sum() / range_pixels),
+            }
+
+            for threshold in thresholds:
+                key = '{:.1f}'.format(threshold)
+                binary_raw = (pred01 > threshold).astype(np.uint8)
+                binary_masked = (binary_raw * range_bin).astype(np.uint8)
+                self._save_gray(binary_masked.astype(np.float32), os.path.join(sample_dir, 'binary_{}.png'.format(key)))
+
+                pred_total = float(binary_raw.sum())
+                outside_white = float((binary_raw * (1 - range_bin)).sum())
+                component_count, avg_area = self._component_stats(binary_masked)
+                dice, iou = self._dice_iou(binary_masked, gt_bin)
+
+                row['Pred_BCR_{}'.format(key)] = float(binary_masked.sum() / range_pixels)
+                row['outside_violation_{}'.format(key)] = 0.0 if pred_total == 0 else outside_white / pred_total
+                row['connected_components_{}'.format(key)] = component_count
+                row['avg_component_area_{}'.format(key)] = avg_area
+                row['dice_{}'.format(key)] = dice
+                row['iou_{}'.format(key)] = iou
+
+            rows.append(row)
+        return rows
+
+    def _save_layout_metrics_csv(self, phase, rows):
+        if self.opt['global_rank'] != 0 or not rows:
+            return
+        result_root = os.path.join(self.opt['path']['results'], phase, str(self.epoch))
+        os.makedirs(result_root, exist_ok=True)
+        fieldnames = [
+            'path',
+            'GT_BCR',
+            'Pred_BCR_0.5',
+            'Pred_BCR_0.6',
+            'Pred_BCR_0.7',
+            'outside_violation_0.5',
+            'outside_violation_0.6',
+            'outside_violation_0.7',
+            'connected_components_0.5',
+            'connected_components_0.6',
+            'connected_components_0.7',
+            'avg_component_area_0.5',
+            'avg_component_area_0.6',
+            'avg_component_area_0.7',
+            'dice_0.5',
+            'dice_0.6',
+            'dice_0.7',
+            'iou_0.5',
+            'iou_0.6',
+            'iou_0.7',
+        ]
+        with open(os.path.join(result_root, 'metrics.csv'), 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
     def train_step(self):
         self.netG.train()
         self.train_metrics.reset()
@@ -131,6 +270,7 @@ class Palette(BaseModel):
     def val_step(self):
         self.netG.eval()
         self.val_metrics.reset()
+        layout_rows = []
         with torch.no_grad():
             for val_data in tqdm.tqdm(self.val_loader):
                 self.set_input(val_data)
@@ -158,12 +298,15 @@ class Palette(BaseModel):
                 for key, value in self.get_current_visuals(phase='val').items():
                     self.writer.add_images(key, value)
                 self.writer.save_images(self.save_current_results())
+                layout_rows.extend(self._save_layout_eval_outputs(phase='val'))
 
+        self._save_layout_metrics_csv('val', layout_rows)
         return self.val_metrics.result()
 
     def test(self):
         self.netG.eval()
         self.test_metrics.reset()
+        layout_rows = []
         with torch.no_grad():
             for phase_data in tqdm.tqdm(self.phase_loader):
                 self.set_input(phase_data)
@@ -190,7 +333,9 @@ class Palette(BaseModel):
                 for key, value in self.get_current_visuals(phase='test').items():
                     self.writer.add_images(key, value)
                 self.writer.save_images(self.save_current_results())
+                layout_rows.extend(self._save_layout_eval_outputs(phase='test'))
         
+        self._save_layout_metrics_csv('test', layout_rows)
         test_log = self.test_metrics.result()
         ''' save logged informations into log dict ''' 
         test_log.update({'epoch': self.epoch, 'iters': self.iter})

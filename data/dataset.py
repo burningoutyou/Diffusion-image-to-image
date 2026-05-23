@@ -4,8 +4,9 @@ from PIL import Image
 import os
 import re
 import torch
+import cv2
 import numpy as np
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import binary_fill_holes
 
 from .util.mask import (bbox2mask, brush_stroke_mask, get_irregular_mask, random_bbox, random_cropping_bbox)
 
@@ -36,6 +37,89 @@ def pil_loader(path):
 
 def pil_gray_loader(path):
     return Image.open(path).convert('L')
+
+def _as_hw(image_size):
+    if isinstance(image_size, (list, tuple)):
+        return int(image_size[0]), int(image_size[1])
+    return int(image_size), int(image_size)
+
+def build_condition_from_heatmap(cond_path, image_size=256):
+    """
+    Convert raw heatmap/range condition image into a 3-channel semantic condition.
+
+    Returns:
+        cond: FloatTensor [3, H, W], range [-1, 1]
+        range_mask: FloatTensor [1, H, W], range [0, 1]
+    """
+    h, w = _as_hw(image_size)
+    img = Image.open(cond_path).convert('RGB')
+    img = img.resize((w, h), BILINEAR_RESAMPLE)
+    rgb = np.asarray(img, dtype=np.float32) / 255.0
+
+    range_mask = (rgb.sum(axis=2) > 0.05).astype(np.float32)
+    range_mask = binary_fill_holes(range_mask > 0).astype(np.float32)
+
+    range_mask_uint8 = (range_mask * 255).astype(np.uint8)
+    distance_map = cv2.distanceTransform(range_mask_uint8, cv2.DIST_L2, 5)
+    if distance_map.max() > 0:
+        distance_map = distance_map / (distance_map.max() + 1e-6)
+    distance_map = distance_map.astype(np.float32)
+
+    gray = rgb.mean(axis=2).astype(np.float32)
+    kernel = np.ones((5, 5), np.uint8)
+    inner_mask = cv2.erode(
+        range_mask.astype(np.uint8),
+        kernel,
+        iterations=1
+    ).astype(np.float32)
+    cleaned_gray = gray * inner_mask
+    if cleaned_gray.max() > cleaned_gray.min():
+        cleaned_gray = (
+            cleaned_gray - cleaned_gray.min()
+        ) / (cleaned_gray.max() - cleaned_gray.min() + 1e-6)
+    cleaned_gray = cleaned_gray.astype(np.float32)
+
+    cond = np.stack([range_mask, distance_map, cleaned_gray], axis=0).astype(np.float32)
+    cond = cond * 2.0 - 1.0
+    range_mask = range_mask[None, :, :].astype(np.float32)
+    return torch.from_numpy(cond).float(), torch.from_numpy(range_mask).float()
+
+def load_binary_gt(gt_path, image_size=256):
+    """
+    Load building layout target mask as strict binary single-channel tensor.
+
+    Returns:
+        gt: FloatTensor [1, H, W], range [-1, 1]
+    """
+    h, w = _as_hw(image_size)
+    gt = Image.open(gt_path).convert('L')
+    gt = gt.resize((w, h), NEAREST_RESAMPLE)
+    gt = np.asarray(gt, dtype=np.float32)
+    gt = (gt > 127).astype(np.float32)
+    gt = gt * 2.0 - 1.0
+    return torch.from_numpy(gt).unsqueeze(0).float()
+
+def _save_gray_tensor(tensor, path):
+    array = tensor.detach().float().cpu().numpy()
+    array = np.clip(array, 0.0, 1.0)
+    image = Image.fromarray((array * 255.0).astype(np.uint8))
+    image.save(path)
+
+def save_layout_condition_debug(sample, output_dir):
+    """
+    Save LayoutCondPairDataset intermediate tensors for a quick visual check.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    cond = sample['cond_image']
+    gt = sample['gt_image']
+
+    cond_vis = (cond + 1.0) / 2.0
+    gt_vis = (gt + 1.0) / 2.0
+
+    _save_gray_tensor(cond_vis[0], os.path.join(output_dir, 'range_mask.png'))
+    _save_gray_tensor(cond_vis[1], os.path.join(output_dir, 'distance_map.png'))
+    _save_gray_tensor(cond_vis[2], os.path.join(output_dir, 'cleaned_gray_heatmap.png'))
+    _save_gray_tensor(gt_vis[0], os.path.join(output_dir, 'gt_binary.png'))
 
 try:
     NEAREST_RESAMPLE = Image.Resampling.NEAREST
@@ -251,37 +335,13 @@ class LayoutCondPairDataset(data.Dataset):
         pairs.sort(key=lambda x: x[0])
         return pairs
 
-    def _load_layout_mask(self, path):
-        layout = self.layout_loader(path).resize(self.pil_size, NEAREST_RESAMPLE)
-        layout = np.asarray(layout, dtype=np.float32) / 255.0
-        layout = (layout > self.layout_threshold).astype(np.float32)
-        return torch.from_numpy(layout).unsqueeze(0) * 2.0 - 1.0
-
-    def _load_condition_map(self, path):
-        cond = self.cond_loader(path).resize(self.pil_size, BILINEAR_RESAMPLE)
-        cond = np.asarray(cond, dtype=np.float32) / 255.0
-
-        range_mask = (cond.max(axis=2) > self.range_threshold).astype(np.float32)
-
-        distance_map = distance_transform_edt(range_mask)
-        max_distance = distance_map.max()
-        if max_distance > 0:
-            distance_map = distance_map / max_distance
-
-        gray_heatmap = 0.299 * cond[:, :, 0] + 0.587 * cond[:, :, 1] + 0.114 * cond[:, :, 2]
-        gray_heatmap = gray_heatmap * range_mask
-        max_gray = gray_heatmap.max()
-        if max_gray > 0:
-            gray_heatmap = gray_heatmap / max_gray
-
-        cond = np.stack([range_mask, distance_map, gray_heatmap], axis=0).astype(np.float32)
-        return torch.from_numpy(cond) * 2.0 - 1.0
-
     def __getitem__(self, index):
         layout_path, cond_path = self.pairs[index]
         ret = {}
-        ret['gt_image'] = self._load_layout_mask(layout_path)
-        ret['cond_image'] = self._load_condition_map(cond_path)
+        cond, range_mask = build_condition_from_heatmap(cond_path, image_size=self.image_size)
+        ret['gt_image'] = load_binary_gt(layout_path, image_size=self.image_size)
+        ret['cond_image'] = cond
+        ret['range_mask'] = range_mask
         ret['path'] = os.path.basename(layout_path)
         return ret
 
