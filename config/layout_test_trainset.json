@@ -1,5 +1,5 @@
 {
-    "name": "layout_cond_pair",
+    "name": "layout_cond_pair_trainset_eval",
     "gpu_ids": [0],
     "seed": -1,
     "finetune_norm": false,
@@ -10,7 +10,7 @@
         "tb_logger": "tb_logger",
         "results": "results",
         "checkpoint": "checkpoint",
-        "resume_state": null
+        "resume_state": "experiments/train_layout_cond_pair_260521_151256/checkpoint/1000"
     },
 
     "datasets": {

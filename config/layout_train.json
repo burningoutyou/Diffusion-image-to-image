@@ -1,5 +1,5 @@
 {
-    "name": "layout_cond_pair",
+    "name": "layout_train",
     "gpu_ids": [0],
     "seed": -1,
     "finetune_norm": false,

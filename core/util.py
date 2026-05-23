@@ -16,8 +16,12 @@ def tensor2img(tensor, out_type=np.uint8, min_max=(-1, 1)):
     n_dim = tensor.dim()
     if n_dim == 4:
         n_img = len(tensor)
-        img_np = make_grid(tensor, nrow=int(math.sqrt(n_img)), normalize=False).numpy()
-        img_np = np.transpose(img_np, (1, 2, 0))  # HWC, RGB
+        img_grid = make_grid(tensor, nrow=int(math.sqrt(n_img)), normalize=False)
+        if tensor.size(1) == 1:
+            img_np = img_grid[0].numpy()
+        else:
+            img_np = img_grid.numpy()
+            img_np = np.transpose(img_np, (1, 2, 0))  # HWC, RGB
     elif n_dim == 3:
         img_np = tensor.numpy()
         img_np = np.transpose(img_np, (1, 2, 0))  # HWC, RGB
@@ -71,6 +75,5 @@ def set_device(args, distributed=False, rank=0):
 		else:
 			args = set_gpu(args, distributed, rank)
 	return args
-
 
 

@@ -77,6 +77,19 @@ class Network(BaseNetwork):
             (1 - sample_gammas).sqrt() * noise
         )
 
+    def is_layout_condition(self, y_cond, sample):
+        return (
+            y_cond is not None and sample is not None and
+            y_cond.dim() == 4 and sample.dim() == 4 and
+            y_cond.shape[1] == 3 and sample.shape[1] == 1
+        )
+
+    def apply_final_range_mask(self, sample, y_cond):
+        # LayoutCondPairDataset stores range_mask as condition channel 0 in [-1, 1].
+        range_mask = (y_cond[:, 0:1] > 0.0).float()
+        background = torch.full_like(sample, -1.0)
+        return torch.where(range_mask > 0.5, sample, background)
+
     @torch.no_grad()
     def p_sample(self, y_t, t, clip_denoised=True, y_cond=None):
         model_mean, model_log_variance = self.p_mean_variance(
@@ -86,12 +99,15 @@ class Network(BaseNetwork):
 
     @torch.no_grad()
     def restoration(self, y_cond, y_t=None, y_0=None, mask=None, sample_num=8):
-        b, *_ = y_cond.shape
+        b, _, h, w = y_cond.shape
 
         assert self.num_timesteps > sample_num, 'num_timesteps must greater than sample_num'
         sample_inter = (self.num_timesteps//sample_num)
-        
-        y_t = default(y_t, lambda: torch.randn_like(y_cond))
+
+        out_channel = self.denoise_fn.out_channel
+        y_t = default(y_t, lambda: torch.randn(
+            b, out_channel, h, w, device=y_cond.device, dtype=y_cond.dtype
+        ))
         ret_arr = y_t
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             t = torch.full((b,), i, device=y_cond.device, dtype=torch.long)
@@ -100,6 +116,10 @@ class Network(BaseNetwork):
                 y_t = y_0*(1.-mask) + mask*y_t
             if i % sample_inter == 0:
                 ret_arr = torch.cat([ret_arr, y_t], dim=0)
+        if self.is_layout_condition(y_cond, y_t):
+            y_t = self.apply_final_range_mask(y_t, y_cond)
+            ret_arr = ret_arr.clone()
+            ret_arr[-b:] = y_t
         return y_t, ret_arr
 
     def forward(self, y_0, y_cond=None, mask=None, noise=None):
@@ -177,5 +197,3 @@ def make_beta_schedule(schedule, n_timestep, linear_start=1e-6, linear_end=1e-2,
     else:
         raise NotImplementedError(schedule)
     return betas
-
-

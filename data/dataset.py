@@ -5,6 +5,7 @@ import os
 import re
 import torch
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 from .util.mask import (bbox2mask, brush_stroke_mask, get_irregular_mask, random_bbox, random_cropping_bbox)
 
@@ -32,6 +33,16 @@ def make_dataset(dir):
 
 def pil_loader(path):
     return Image.open(path).convert('RGB')
+
+def pil_gray_loader(path):
+    return Image.open(path).convert('L')
+
+try:
+    NEAREST_RESAMPLE = Image.Resampling.NEAREST
+    BILINEAR_RESAMPLE = Image.Resampling.BILINEAR
+except AttributeError:
+    NEAREST_RESAMPLE = Image.NEAREST
+    BILINEAR_RESAMPLE = Image.BILINEAR
 
 class InpaintDataset(data.Dataset):
     def __init__(self, data_root, mask_config={}, data_len=-1, image_size=[256, 256], loader=pil_loader):
@@ -191,17 +202,26 @@ class LayoutCondPairDataset(data.Dataset):
     a ``_cond`` partner are ignored (to avoid duplicates).
     """
 
-    def __init__(self, data_root, cond_suffix='_cond', data_len=-1, image_size=[256, 256], loader=pil_loader):
+    def __init__(
+        self,
+        data_root,
+        cond_suffix='_cond',
+        data_len=-1,
+        image_size=[256, 256],
+        layout_loader=pil_gray_loader,
+        cond_loader=pil_loader,
+        layout_threshold=0.5,
+        range_threshold=0.03
+    ):
         assert os.path.isdir(data_root), '%s is not a valid directory' % data_root
         self.data_root = data_root
         self.cond_suffix = cond_suffix if str(cond_suffix).startswith('_') else '_' + str(cond_suffix)
-        self.loader = loader
+        self.layout_loader = layout_loader
+        self.cond_loader = cond_loader
         self.image_size = image_size
-        self.tfs = transforms.Compose([
-            transforms.Resize((image_size[0], image_size[1])),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        ])
+        self.layout_threshold = layout_threshold
+        self.range_threshold = range_threshold
+        self.pil_size = (image_size[1], image_size[0])
         self.pairs = self._collect_pairs(data_root, self.cond_suffix)
         if len(self.pairs) == 0:
             raise RuntimeError(
@@ -231,14 +251,39 @@ class LayoutCondPairDataset(data.Dataset):
         pairs.sort(key=lambda x: x[0])
         return pairs
 
+    def _load_layout_mask(self, path):
+        layout = self.layout_loader(path).resize(self.pil_size, NEAREST_RESAMPLE)
+        layout = np.asarray(layout, dtype=np.float32) / 255.0
+        layout = (layout > self.layout_threshold).astype(np.float32)
+        return torch.from_numpy(layout).unsqueeze(0) * 2.0 - 1.0
+
+    def _load_condition_map(self, path):
+        cond = self.cond_loader(path).resize(self.pil_size, BILINEAR_RESAMPLE)
+        cond = np.asarray(cond, dtype=np.float32) / 255.0
+
+        range_mask = (cond.max(axis=2) > self.range_threshold).astype(np.float32)
+
+        distance_map = distance_transform_edt(range_mask)
+        max_distance = distance_map.max()
+        if max_distance > 0:
+            distance_map = distance_map / max_distance
+
+        gray_heatmap = 0.299 * cond[:, :, 0] + 0.587 * cond[:, :, 1] + 0.114 * cond[:, :, 2]
+        gray_heatmap = gray_heatmap * range_mask
+        max_gray = gray_heatmap.max()
+        if max_gray > 0:
+            gray_heatmap = gray_heatmap / max_gray
+
+        cond = np.stack([range_mask, distance_map, gray_heatmap], axis=0).astype(np.float32)
+        return torch.from_numpy(cond) * 2.0 - 1.0
+
     def __getitem__(self, index):
         layout_path, cond_path = self.pairs[index]
         ret = {}
-        ret['gt_image'] = self.tfs(self.loader(layout_path))
-        ret['cond_image'] = self.tfs(self.loader(cond_path))
+        ret['gt_image'] = self._load_layout_mask(layout_path)
+        ret['cond_image'] = self._load_condition_map(cond_path)
         ret['path'] = os.path.basename(layout_path)
         return ret
 
     def __len__(self):
         return len(self.pairs)
-
