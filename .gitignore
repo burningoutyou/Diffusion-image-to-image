@@ -3,6 +3,7 @@ experiments/*
 datasets/*
 dataset/train/
 dataset/train_remake/
+dataset/pilot_train_remake_split_*/
 !experiments/clean.sh
 
 # checkpoints / weights (large binaries — keep locally, do not push)

@@ -1,0 +1,173 @@
+﻿{
+    "name":  "pilot_module1_module2b2_train_remake_100k_continue",
+    "gpu_ids":  [
+                    0
+                ],
+    "seed":  -1,
+    "finetune_norm":  false,
+    "path":  {
+                 "base_dir":  "experiments",
+                 "code":  "code",
+                 "tb_logger":  "tb_logger",
+                 "results":  "results",
+                 "checkpoint":  "checkpoint",
+                 "resume_state":  "G:\\xjw\\project\\Image to Image Diffusion Model\\Palette-Image-to-Image-Diffusion-Models-main\\experiments\\train_pilot_module1_module2b2_train_remake_50k_260523_184318\\checkpoint\\15"
+             },
+    "datasets":  {
+                     "train":  {
+                                   "which_dataset":  {
+                                                         "name":  [
+                                                                      "data.dataset",
+                                                                      "LayoutCondPairDataset"
+                                                                  ],
+                                                         "args":  {
+                                                                      "data_root":  "dataset/pilot_train_remake_split_260523_180909/trainval",
+                                                                      "cond_suffix":  "_cond",
+                                                                      "data_len":  -1,
+                                                                      "layout_threshold":  0.5,
+                                                                      "range_threshold":  0.03,
+                                                                      "image_size":  [
+                                                                                         256,
+                                                                                         256
+                                                                                     ]
+                                                                  }
+                                                     },
+                                   "dataloader":  {
+                                                      "validation_split":  437,
+                                                      "args":  {
+                                                                   "batch_size":  2,
+                                                                   "num_workers":  0,
+                                                                   "shuffle":  true,
+                                                                   "pin_memory":  false,
+                                                                   "drop_last":  false
+                                                               },
+                                                      "val_args":  {
+                                                                       "batch_size":  2,
+                                                                       "num_workers":  0,
+                                                                       "shuffle":  false,
+                                                                       "pin_memory":  false,
+                                                                       "drop_last":  false
+                                                                   }
+                                                  }
+                               },
+                     "test":  {
+                                  "which_dataset":  {
+                                                        "name":  [
+                                                                     "data.dataset",
+                                                                     "LayoutCondPairDataset"
+                                                                 ],
+                                                        "args":  {
+                                                                     "data_root":  "dataset/pilot_train_remake_split_260523_180909/test",
+                                                                     "cond_suffix":  "_cond",
+                                                                     "data_len":  -1,
+                                                                     "layout_threshold":  0.5,
+                                                                     "range_threshold":  0.03,
+                                                                     "image_size":  [
+                                                                                        256,
+                                                                                        256
+                                                                                    ]
+                                                                 }
+                                                    },
+                                  "dataloader":  {
+                                                     "args":  {
+                                                                  "batch_size":  2,
+                                                                  "num_workers":  0,
+                                                                  "pin_memory":  false
+                                                              }
+                                                 }
+                              }
+                 },
+    "model":  {
+                  "which_model":  {
+                                      "name":  [
+                                                   "models.model",
+                                                   "Palette"
+                                               ],
+                                      "args":  {
+                                                   "sample_num":  2,
+                                                   "task":  "colorization",
+                                                   "ema_scheduler":  {
+                                                                         "ema_start":  1,
+                                                                         "ema_iter":  1,
+                                                                         "ema_decay":  0.9999
+                                                                     },
+                                                   "optimizers":  [
+                                                                      {
+                                                                          "lr":  0.0001,
+                                                                          "weight_decay":  0
+                                                                      }
+                                                                  ]
+                                               }
+                                  },
+                  "which_networks":  [
+                                         {
+                                             "name":  [
+                                                          "models.network",
+                                                          "Network"
+                                                      ],
+                                             "args":  {
+                                                          "init_type":  "kaiming",
+                                                          "module_name":  "guided_diffusion",
+                                                          "unet":  {
+                                                                       "in_channel":  4,
+                                                                       "out_channel":  1,
+                                                                       "inner_channel":  32,
+                                                                       "channel_mults":  [
+                                                                                             1,
+                                                                                             2,
+                                                                                             4
+                                                                                         ],
+                                                                       "attn_res":  [
+                                                                                        16
+                                                                                    ],
+                                                                       "num_head_channels":  32,
+                                                                       "res_blocks":  1,
+                                                                       "dropout":  0.0,
+                                                                       "image_size":  256
+                                                                   },
+                                                          "beta_schedule":  {
+                                                                                "train":  {
+                                                                                              "schedule":  "linear",
+                                                                                              "n_timestep":  1000,
+                                                                                              "linear_start":  1E-06,
+                                                                                              "linear_end":  0.01
+                                                                                          },
+                                                                                "test":  {
+                                                                                             "schedule":  "linear",
+                                                                                             "n_timestep":  500,
+                                                                                             "linear_start":  0.0001,
+                                                                                             "linear_end":  0.09
+                                                                                         }
+                                                                            },
+                                                          "aux_loss":  {
+                                                                           "enabled":  true,
+                                                                           "module":  "Module 2B-2",
+                                                                           "lambda_bce":  0.04,
+                                                                           "lambda_dice":  0.05,
+                                                                           "lambda_bcr":  0.01
+                                                                       }
+                                                      }
+                                         }
+                                     ],
+                  "which_losses":  [
+                                       "mse_loss"
+                                   ],
+                  "which_metrics":  [
+                                        "mae"
+                                    ]
+              },
+    "train":  {
+                  "n_epoch":  1000,
+                  "n_iter":  100000,
+                  "val_epoch":  999999,
+                  "save_checkpoint_epoch":  1,
+                  "log_iter":  500,
+                  "tensorboard":  true
+              },
+    "debug":  {
+                  "val_epoch":  1,
+                  "save_checkpoint_epoch":  1,
+                  "log_iter":  10,
+                  "debug_split":  50
+              }
+}

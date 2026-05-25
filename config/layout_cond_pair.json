@@ -112,6 +112,13 @@
                             "linear_start": 1e-4,
                             "linear_end": 0.09
                         }
+                    },
+                    "aux_loss": {
+                        "enabled": true,
+                        "module": "Module 2B-2",
+                        "lambda_bce": 0.04,
+                        "lambda_dice": 0.05,
+                        "lambda_bcr": 0.01
                     }
                 }
             }

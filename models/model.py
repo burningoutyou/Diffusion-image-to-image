@@ -49,12 +49,33 @@ class Palette(BaseModel):
         if self.opt['distributed']:
             self.netG.module.set_loss(self.loss_fn)
             self.netG.module.set_new_noise_schedule(phase=self.phase)
+            netG_for_log = self.netG.module
         else:
             self.netG.set_loss(self.loss_fn)
             self.netG.set_new_noise_schedule(phase=self.phase)
+            netG_for_log = self.netG
+
+        if getattr(netG_for_log, 'aux_loss_enabled', False):
+            self.logger.info(
+                'Current setting: Module 1 + Module 2B-2, lambda_bce={:.2f}, lambda_dice={:.2f}, lambda_bcr={:.2f}, target_iter={}'.format(
+                    netG_for_log.lambda_bce,
+                    netG_for_log.lambda_dice,
+                    netG_for_log.lambda_bcr,
+                    self.opt['train'].get('n_iter', 'unknown')
+                )
+            )
 
         ''' can rewrite in inherited class for more informations logging '''
-        self.train_metrics = LogTracker(*[m.__name__ for m in losses], phase='train')
+        train_metric_keys = [m.__name__ for m in losses] + [
+            'loss_noise',
+            'loss_bce',
+            'loss_dice',
+            'loss_bcr',
+            'loss_total',
+            'pred_bcr_mean',
+            'gt_bcr_mean',
+        ]
+        self.train_metrics = LogTracker(*train_metric_keys, phase='train')
         self.val_metrics = LogTracker(*[m.__name__ for m in self.metrics], phase='val')
         self.test_metrics = LogTracker(*[m.__name__ for m in self.metrics], phase='test')
 
@@ -146,6 +167,17 @@ class Palette(BaseModel):
         iou = 1.0 if union == 0 else float(intersection / union)
         return dice, iou
 
+    @staticmethod
+    def _precision_recall(pred, gt):
+        pred = pred.astype(bool)
+        gt = gt.astype(bool)
+        true_positive = np.logical_and(pred, gt).sum()
+        false_positive = np.logical_and(pred, np.logical_not(gt)).sum()
+        false_negative = np.logical_and(np.logical_not(pred), gt).sum()
+        precision = float(true_positive / (true_positive + false_positive + 1e-6))
+        recall = float(true_positive / (true_positive + false_negative + 1e-6))
+        return precision, recall
+
     def _get_range_mask_batch(self):
         if self.range_mask is not None:
             return self._to_01(self.range_mask)
@@ -197,6 +229,7 @@ class Palette(BaseModel):
                 outside_white = float((binary_raw * (1 - range_bin)).sum())
                 component_count, avg_area = self._component_stats(binary_masked)
                 dice, iou = self._dice_iou(binary_masked, gt_bin)
+                precision, recall = self._precision_recall(binary_masked, gt_bin)
 
                 row['Pred_BCR_{}'.format(key)] = float(binary_masked.sum() / range_pixels)
                 row['outside_violation_{}'.format(key)] = 0.0 if pred_total == 0 else outside_white / pred_total
@@ -204,6 +237,8 @@ class Palette(BaseModel):
                 row['avg_component_area_{}'.format(key)] = avg_area
                 row['dice_{}'.format(key)] = dice
                 row['iou_{}'.format(key)] = iou
+                row['precision_{}'.format(key)] = precision
+                row['recall_{}'.format(key)] = recall
 
             rows.append(row)
         return rows
@@ -234,6 +269,12 @@ class Palette(BaseModel):
             'iou_0.5',
             'iou_0.6',
             'iou_0.7',
+            'precision_0.5',
+            'precision_0.6',
+            'precision_0.7',
+            'recall_0.5',
+            'recall_0.6',
+            'recall_0.7',
         ]
         with open(os.path.join(result_root, 'metrics.csv'), 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -246,13 +287,23 @@ class Palette(BaseModel):
         for train_data in tqdm.tqdm(self.phase_loader):
             self.set_input(train_data)
             self.optG.zero_grad()
-            loss = self.netG(self.gt_image, self.cond_image, mask=self.mask)
+            loss = self.netG(
+                self.gt_image,
+                self.cond_image,
+                mask=self.mask,
+                range_mask=self.range_mask
+            )
             loss.backward()
             self.optG.step()
 
             self.iter += self.batch_size
             self.writer.set_iter(self.epoch, self.iter, phase='train')
             self.train_metrics.update(self.loss_fn.__name__, loss.item())
+            netG = self.netG.module if self.opt['distributed'] else self.netG
+            for key, value in netG.get_loss_details().items():
+                if torch.is_tensor(value):
+                    value = value.detach().float().mean().item()
+                self.train_metrics.update(key, float(value))
             if self.iter % self.opt['train']['log_iter'] == 0:
                 for key, value in self.train_metrics.result().items():
                     self.logger.info('{:5s}: {}\t'.format(str(key), value))
