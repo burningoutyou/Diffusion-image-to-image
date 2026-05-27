@@ -1,0 +1,4 @@
+﻿method,dice,iou,bcr_error,outside_violation,max_component_ratio,aspect_valid_ratio
+U-Net / ResUNet baseline (pending),,,,,,
+Palette baseline (pending),,,,,,
+"Ours: M1 + M2B-2 + M3 (strict top-1, checkpoint 90974)",0.313034,0.192300,0.084151,0.000000,0.410695,0.629338

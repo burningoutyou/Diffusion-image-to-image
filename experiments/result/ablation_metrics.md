@@ -1,0 +1,10 @@
+# Ablation Metrics
+
+Gap-C is excluded from this ablation table. Module 1-only metrics use the available 9-sample debug experiment and are not directly comparable with the 438-sample pilot/test split.
+
+| method | bcr_error | outside_violation | max_component_ratio | aspect_valid_ratio | dice |
+| --- | --- | --- | --- | --- | --- |
+| Palette baseline (pending) |  |  |  |  |  |
+| Palette + Module 1 (debug 9 samples) | 0.608934 | 0.000000 |  |  | 0.368324 |
+| Palette + Module 1 + Module 2B-2 (single sample, checkpoint 90974) | 0.102346 | 0.000000 | 0.627238 | 0.302858 | 0.341345 |
+| Palette + Module 1 + Module 2B-2 + Module 3 (strict top-1, checkpoint 90974) | 0.084151 | 0.000000 | 0.410695 | 0.629338 | 0.313034 |

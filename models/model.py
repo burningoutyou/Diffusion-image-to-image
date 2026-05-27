@@ -141,18 +141,57 @@ class Palette(BaseModel):
         Image.fromarray((array * 255.0).astype(np.uint8)).save(path)
 
     @staticmethod
-    def _component_stats(binary, min_area=10):
+    def _component_geometry_stats(binary, min_area=10, small_area=20):
         num_labels, _, stats, _ = cv2.connectedComponentsWithStats(
             binary.astype(np.uint8), connectivity=8
         )
-        areas = [
-            int(stats[label, cv2.CC_STAT_AREA])
-            for label in range(1, num_labels)
-            if int(stats[label, cv2.CC_STAT_AREA]) >= min_area
-        ]
-        if not areas:
-            return 0, 0.0
-        return len(areas), float(np.mean(areas))
+        total_area = float(binary.astype(np.uint8).sum())
+        if total_area <= 0:
+            return {
+                'connected_components': 0,
+                'avg_component_area': 0.0,
+                'small_fragment_ratio': 1.0,
+                'max_component_area_ratio': 1.0,
+                'aspect_ratio_mean': 0.0,
+                'aspect_ratio_valid_ratio': 0.0,
+            }
+
+        valid_areas = []
+        valid_aspect_ratios = []
+        small_fragment_area = 0.0
+        max_area = 0.0
+        for label in range(1, num_labels):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            max_area = max(max_area, float(area))
+            if area < small_area:
+                small_fragment_area += float(area)
+            if area < min_area:
+                continue
+            width = float(stats[label, cv2.CC_STAT_WIDTH])
+            height = float(stats[label, cv2.CC_STAT_HEIGHT])
+            aspect_ratio = max(width, height) / (min(width, height) + 1e-6)
+            valid_areas.append(area)
+            valid_aspect_ratios.append(aspect_ratio)
+
+        if not valid_areas:
+            return {
+                'connected_components': 0,
+                'avg_component_area': 0.0,
+                'small_fragment_ratio': float(small_fragment_area / total_area),
+                'max_component_area_ratio': float(max_area / total_area),
+                'aspect_ratio_mean': 0.0,
+                'aspect_ratio_valid_ratio': 0.0,
+            }
+
+        aspect_ratios = np.asarray(valid_aspect_ratios, dtype=np.float32)
+        return {
+            'connected_components': len(valid_areas),
+            'avg_component_area': float(np.mean(valid_areas)),
+            'small_fragment_ratio': float(small_fragment_area / total_area),
+            'max_component_area_ratio': float(max_area / total_area),
+            'aspect_ratio_mean': float(aspect_ratios.mean()),
+            'aspect_ratio_valid_ratio': float((aspect_ratios > 2.0).mean()),
+        }
 
     @staticmethod
     def _dice_iou(pred, gt):
@@ -224,17 +263,22 @@ class Palette(BaseModel):
                 binary_raw = (pred01 > threshold).astype(np.uint8)
                 binary_masked = (binary_raw * range_bin).astype(np.uint8)
                 self._save_gray(binary_masked.astype(np.float32), os.path.join(sample_dir, 'binary_{}.png'.format(key)))
+                if key == '0.5':
+                    self._save_gray(binary_masked.astype(np.float32), os.path.join(sample_dir, 'selected_binary.png'))
 
                 pred_total = float(binary_raw.sum())
                 outside_white = float((binary_raw * (1 - range_bin)).sum())
-                component_count, avg_area = self._component_stats(binary_masked)
+                component_stats = self._component_geometry_stats(binary_masked)
                 dice, iou = self._dice_iou(binary_masked, gt_bin)
                 precision, recall = self._precision_recall(binary_masked, gt_bin)
 
                 row['Pred_BCR_{}'.format(key)] = float(binary_masked.sum() / range_pixels)
                 row['outside_violation_{}'.format(key)] = 0.0 if pred_total == 0 else outside_white / pred_total
-                row['connected_components_{}'.format(key)] = component_count
-                row['avg_component_area_{}'.format(key)] = avg_area
+                row['connected_components_{}'.format(key)] = component_stats['connected_components']
+                row['avg_component_area_{}'.format(key)] = component_stats['avg_component_area']
+                row['max_component_area_ratio_{}'.format(key)] = component_stats['max_component_area_ratio']
+                row['aspect_ratio_valid_ratio_{}'.format(key)] = component_stats['aspect_ratio_valid_ratio']
+                row['small_fragment_ratio_{}'.format(key)] = component_stats['small_fragment_ratio']
                 row['dice_{}'.format(key)] = dice
                 row['iou_{}'.format(key)] = iou
                 row['precision_{}'.format(key)] = precision
@@ -263,6 +307,15 @@ class Palette(BaseModel):
             'avg_component_area_0.5',
             'avg_component_area_0.6',
             'avg_component_area_0.7',
+            'max_component_area_ratio_0.5',
+            'max_component_area_ratio_0.6',
+            'max_component_area_ratio_0.7',
+            'aspect_ratio_valid_ratio_0.5',
+            'aspect_ratio_valid_ratio_0.6',
+            'aspect_ratio_valid_ratio_0.7',
+            'small_fragment_ratio_0.5',
+            'small_fragment_ratio_0.6',
+            'small_fragment_ratio_0.7',
             'dice_0.5',
             'dice_0.6',
             'dice_0.7',
@@ -313,6 +366,8 @@ class Palette(BaseModel):
             if self.ema_scheduler is not None:
                 if self.iter > self.ema_scheduler['ema_start'] and self.iter % self.ema_scheduler['ema_iter'] == 0:
                     self.EMA.update_model_average(self.netG_EMA, self.netG)
+            if self.iter >= self.opt['train']['n_iter']:
+                break
 
         for scheduler in self.schedulers:
             scheduler.step()
