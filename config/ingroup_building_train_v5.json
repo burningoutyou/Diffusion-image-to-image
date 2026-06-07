@@ -1,0 +1,218 @@
+{
+    "name": "ingroup_building_model_v5",
+    "gpu_ids": [
+        0
+    ],
+    "seed": -1,
+    "finetune_norm": false,
+    "path": {
+        "base_dir": "G:/xjw/project/Image to Image Diffusion Model(base_line_final)/Palette-Image-to-Image-Diffusion-Models-main/spilt_group/model_v5",
+        "code": "code",
+        "tb_logger": "tb_logger",
+        "results": "results",
+        "checkpoint": "checkpoint",
+        "resume_state": null
+    },
+    "datasets": {
+        "train": {
+            "which_dataset": {
+                "name": [
+                    "data.dataset",
+                    "LayoutCondPairDataset"
+                ],
+                "args": {
+                    "data_root": "G:/xjw/project/Image to Image Diffusion Model(base_line_final)/Palette-Image-to-Image-Diffusion-Models-main/dataset/ingroup_data/BuildingsInGroup_DistanceField_no_boundary/train_remake",
+                    "cond_suffix": "_cond",
+                    "data_len": -1,
+                    "layout_threshold": 0.5,
+                    "range_threshold": 0.03,
+                    "image_size": [
+                        256,
+                        256
+                    ]
+                }
+            },
+            "dataloader": {
+                "validation_split": 0,
+                "args": {
+                    "batch_size": 2,
+                    "num_workers": 4,
+                    "shuffle": true,
+                    "pin_memory": true,
+                    "drop_last": false
+                },
+                "val_args": {
+                    "batch_size": 1,
+                    "num_workers": 4,
+                    "shuffle": false,
+                    "pin_memory": true,
+                    "drop_last": false
+                }
+            }
+        },
+        "test": {
+            "which_dataset": {
+                "name": [
+                    "data.dataset",
+                    "LayoutCondPairDataset"
+                ],
+                "args": {
+                    "data_root": "G:/xjw/project/Image to Image Diffusion Model(base_line_final)/Palette-Image-to-Image-Diffusion-Models-main/dataset/ingroup_data/BuildingsInGroup_DistanceField_no_boundary/train_remake",
+                    "cond_suffix": "_cond",
+                    "data_len": -1,
+                    "layout_threshold": 0.5,
+                    "range_threshold": 0.03,
+                    "image_size": [
+                        256,
+                        256
+                    ]
+                }
+            },
+            "dataloader": {
+                "args": {
+                    "batch_size": 1,
+                    "num_workers": 4,
+                    "shuffle": false,
+                    "pin_memory": true
+                }
+            }
+        }
+    },
+    "model": {
+        "which_model": {
+            "name": [
+                "models.model",
+                "Palette"
+            ],
+            "args": {
+                "sample_num": 2,
+                "task": "colorization",
+                "ema_scheduler": {
+                    "ema_start": 1,
+                    "ema_iter": 1,
+                    "ema_decay": 0.9999
+                },
+                "optimizers": [
+                    {
+                        "lr": 0.0002,
+                        "weight_decay": 0
+                    }
+                ]
+            }
+        },
+        "which_networks": [
+            {
+                "name": [
+                    "models.network",
+                    "Network"
+                ],
+                "args": {
+                    "init_type": "kaiming",
+                    "module_name": "guided_diffusion",
+                    "unet": {
+                        "in_channel": 4,
+                        "out_channel": 1,
+                        "inner_channel": 32,
+                        "channel_mults": [
+                            1,
+                            2,
+                            4
+                        ],
+                        "attn_res": [
+                            16
+                        ],
+                        "num_head_channels": 32,
+                        "res_blocks": 1,
+                        "dropout": 0.0,
+                        "image_size": 256
+                    },
+                    "beta_schedule": {
+                        "train": {
+                            "schedule": "linear",
+                            "n_timestep": 1000,
+                            "linear_start": 1e-06,
+                            "linear_end": 0.01
+                        },
+                        "test": {
+                            "schedule": "linear",
+                            "n_timestep": 500,
+                            "linear_start": 0.0001,
+                            "linear_end": 0.09
+                        }
+                    },
+                    "aux_loss": {
+                        "enabled": true,
+                        "module": "Module 2B-2 + L_bg v5",
+                        "lambda_bce": 0.1,
+                        "lambda_dice": 0.2,
+                        "lambda_bcr": 0.03,
+                        "use_bg_loss": true,
+                        "lambda_bg": 0.02
+                    }
+                }
+            }
+        ],
+        "which_losses": [
+            "mse_loss"
+        ],
+        "which_metrics": [
+            "mae"
+        ]
+    },
+    "train": {
+        "n_epoch": 200,
+        "n_iter": 100000000,
+        "val_epoch": 1000,
+        "save_checkpoint_epoch": 10,
+        "log_iter": 100,
+        "tensorboard": true,
+        "save_latest_alias": true,
+        "save_best_alias": true,
+        "epoch_sample": {
+            "enabled": true,
+            "interval": 10,
+            "save_dir": "G:/xjw/project/Image to Image Diffusion Model(base_line_final)/Palette-Image-to-Image-Diffusion-Models-main/spilt_group/epoch_sample_v5",
+            "data_root": "G:/xjw/project/Image to Image Diffusion Model(base_line_final)/Palette-Image-to-Image-Diffusion-Models-main/dataset/ingroup_data/BuildingsInGroup_DistanceField_no_boundary/train_remake",
+            "cond_suffix": "_cond",
+            "monitor_sample_name": null,
+            "binary_threshold": null,
+            "clean_min_area": 8,
+            "clean_kernel_size": 2,
+            "sample_count": 8,
+            "min_component_area": 8,
+            "best_metric": "avg_clean_dice",
+            "best_mode": "max",
+            "clean_morphology": "close_open_h",
+            "binary_thresholds": [
+                null,
+                100,
+                110,
+                120
+            ],
+            "clean_close_kernel": [
+                5,
+                2
+            ],
+            "clean_close_kernels": [
+                [
+                    3,
+                    2
+                ],
+                [
+                    5,
+                    2
+                ],
+                [
+                    7,
+                    2
+                ]
+            ]
+        }
+    },
+    "debug": {
+        "val_epoch": 1,
+        "save_checkpoint_epoch": 1,
+        "log_iter": 10,
+        "debug_split": 50
+    }
+}

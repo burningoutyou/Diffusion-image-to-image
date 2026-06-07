@@ -1,4 +1,4 @@
-import math
+﻿import math
 import torch
 import torch.nn.functional as F
 from inspect import isfunction
@@ -18,10 +18,12 @@ class Network(BaseNetwork):
         self.beta_schedule = beta_schedule
         self.aux_loss_opt = aux_loss or {}
         self.aux_loss_enabled = bool(self.aux_loss_opt.get('enabled', False))
-        # Fixed Module 2B-2: BCE=0.04, Dice=0.05, BCR=0.01.
+        # Module 2 auxiliary losses are controlled by config; L_bg is optional.
         self.lambda_bce = float(self.aux_loss_opt.get('lambda_bce', 0.04))
         self.lambda_dice = float(self.aux_loss_opt.get('lambda_dice', 0.05))
         self.lambda_bcr = float(self.aux_loss_opt.get('lambda_bcr', 0.01))
+        self.use_bg_loss = bool(self.aux_loss_opt.get('use_bg_loss', False))
+        self.lambda_bg = float(self.aux_loss_opt.get('lambda_bg', 0.0))
         self.loss_details = {}
 
     def set_loss(self, loss_fn):
@@ -122,6 +124,7 @@ class Network(BaseNetwork):
                 'loss_bce': zero,
                 'loss_dice': zero,
                 'loss_bcr': zero,
+                'loss_bg': zero,
                 'pred_bcr_mean': zero,
                 'gt_bcr_mean': zero,
             }
@@ -141,16 +144,22 @@ class Network(BaseNetwork):
         pred_bcr = (pred01 * range_mask).sum(dim=dims) / range_area
         gt_bcr = (gt01 * range_mask).sum(dim=dims) / range_area
         loss_bcr = F.l1_loss(pred_bcr, gt_bcr)
+        if self.use_bg_loss and self.lambda_bg > 0.0:
+            loss_bg = (pred01 * (1.0 - gt01)).mean()
+        else:
+            loss_bg = zero
 
         loss_aux = (
             self.lambda_bce * loss_bce +
             self.lambda_dice * loss_dice +
-            self.lambda_bcr * loss_bcr
+            self.lambda_bcr * loss_bcr +
+            self.lambda_bg * loss_bg
         )
         return loss_aux, {
             'loss_bce': loss_bce,
             'loss_dice': loss_dice,
             'loss_bcr': loss_bcr,
+            'loss_bg': loss_bg,
             'pred_bcr_mean': pred_bcr.mean(),
             'gt_bcr_mean': gt_bcr.mean(),
         }
@@ -213,6 +222,7 @@ class Network(BaseNetwork):
             'loss_bce': zero,
             'loss_dice': zero,
             'loss_bcr': zero,
+            'loss_bg': zero,
             'pred_bcr_mean': zero,
             'gt_bcr_mean': zero,
         }
@@ -230,6 +240,7 @@ class Network(BaseNetwork):
             'loss_bce': aux_details['loss_bce'].detach(),
             'loss_dice': aux_details['loss_dice'].detach(),
             'loss_bcr': aux_details['loss_bcr'].detach(),
+            'loss_bg': aux_details['loss_bg'].detach(),
             'loss_total': loss_total.detach(),
             'pred_bcr_mean': aux_details['pred_bcr_mean'].detach(),
             'gt_bcr_mean': aux_details['gt_bcr_mean'].detach(),
@@ -290,3 +301,4 @@ def make_beta_schedule(schedule, n_timestep, linear_start=1e-6, linear_end=1e-2,
     else:
         raise NotImplementedError(schedule)
     return betas
+

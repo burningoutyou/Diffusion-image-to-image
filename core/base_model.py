@@ -50,6 +50,9 @@ class BaseModel():
             ''' print logged informations to the screen and tensorboard ''' 
             for key, value in train_log.items():
                 self.logger.info('{:5s}: {}\t'.format(str(key), value))
+
+            if hasattr(self, 'on_train_epoch_end'):
+                self.on_train_epoch_end()
             
             if self.epoch % self.opt['train']['save_checkpoint_epoch'] == 0:
                 self.logger.info('Saving the self at the end of epoch {:.0f}'.format(self.epoch))
@@ -162,6 +165,8 @@ class BaseModel():
 
         self.epoch = resume_state['epoch']
         self.iter = resume_state['iter']
+        self.logger.info('[Resume] Loaded checkpoint from epoch {}'.format(self.epoch))
+        self.logger.info('[Resume] Continue training from epoch {}'.format(self.epoch + 1))
 
     def load_everything(self):
         pass 

@@ -104,6 +104,7 @@ def parse(args):
 
     ''' replace the config context using args '''
     opt['phase'] = args.phase
+    opt['config_path'] = args.config
     if args.gpu_ids is not None:
         opt['gpu_ids'] = [int(id) for id in args.gpu_ids.split(',')]
     if args.batch is not None:
