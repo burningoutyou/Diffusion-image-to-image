@@ -53,6 +53,9 @@ class BaseModel():
 
             if hasattr(self, 'on_train_epoch_end'):
                 self.on_train_epoch_end()
+            if getattr(self, 'request_stop_training', False):
+                self.logger.info('[EarlyStop] Training stopped after epoch {}'.format(self.epoch))
+                break
             
             if self.epoch % self.opt['train']['save_checkpoint_epoch'] == 0:
                 self.logger.info('Saving the self at the end of epoch {:.0f}'.format(self.epoch))

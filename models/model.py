@@ -46,7 +46,13 @@ class Palette(BaseModel):
 
         self.optG = torch.optim.Adam(list(filter(lambda p: p.requires_grad, self.netG.parameters())), **optimizers[0])
         self.optimizers.append(self.optG)
-        self.resume_training() 
+        self.resume_training()
+        finetune_cfg = self.opt['train'].get('finetune', {}) or {}
+        if finetune_cfg.get('enabled', False) and finetune_cfg.get('force_optimizer_lr', True):
+            target_lr = float(optimizers[0].get('lr', self.optG.param_groups[0].get('lr', 0.0)))
+            for param_group in self.optG.param_groups:
+                param_group['lr'] = target_lr
+            self.logger.info('[Finetune] Optimizer learning rate forced to {}'.format(target_lr))
 
         if self.opt['distributed']:
             self.netG.module.set_loss(self.loss_fn)
@@ -263,6 +269,8 @@ class Palette(BaseModel):
             self.epoch_sample_binary_thresholds.append(None if threshold is None else int(threshold))
         if self.epoch_sample_binary_threshold not in self.epoch_sample_binary_thresholds:
             self.epoch_sample_binary_thresholds.insert(0, self.epoch_sample_binary_threshold)
+        self.epoch_sample_use_postprocess = bool(cfg.get('use_postprocess', True))
+        self.epoch_sample_save_clean = bool(cfg.get('save_clean', self.epoch_sample_use_postprocess)) and self.epoch_sample_use_postprocess
         self.epoch_sample_clean_min_area = int(cfg.get('clean_min_area', cfg.get('min_component_area', 20)))
         self.epoch_sample_clean_kernel_size = int(cfg.get('clean_kernel_size', 2))
         self.epoch_sample_clean_morphology = cfg.get('clean_morphology', cfg.get('morphology', 'open'))
@@ -270,6 +278,13 @@ class Palette(BaseModel):
         self.epoch_sample_default_clean_close_kernel = cfg.get('clean_close_kernel', [5, 2])
         self.epoch_sample_best_metric = cfg.get('best_metric', 'avg_clean_dice')
         self.epoch_sample_best_mode = cfg.get('best_mode', 'max')
+        self.epoch_sample_best_log_name = cfg.get('best_log_name', None)
+        self.epoch_sample_over_generation_white_ratio = float(cfg.get('over_generation_white_ratio', 1.5))
+        patience = cfg.get('early_stop_patience', None)
+        self.epoch_sample_early_stop_patience = None if patience in [None, '', 0, '0'] else int(patience)
+        self.epoch_sample_early_stop_min_delta = float(cfg.get('early_stop_min_delta', 0.0))
+        self.epoch_sample_no_improve_count = 0
+        self.request_stop_training = False
         os.makedirs(self.epoch_sample_save_dir, exist_ok=True)
         self.epoch_sample_pairs = self._find_epoch_sample_pairs()
         self.epoch_sample_pair = self.epoch_sample_pairs[0] if self.epoch_sample_pairs else None
@@ -297,10 +312,21 @@ class Palette(BaseModel):
         self.logger.info('[Config] learning_rate = {}'.format(optimizer_opt.get('lr')))
         self.logger.info('[Config] binary_threshold = {}'.format(epoch_sample_cfg.get('binary_threshold', None)))
         self.logger.info('[Config] binary_thresholds = {}'.format(epoch_sample_cfg.get('binary_thresholds', [None, 100, 110, 120])))
+        self.logger.info('[Config] use_postprocess = {}'.format(epoch_sample_cfg.get('use_postprocess', True)))
+        self.logger.info('[Config] save_clean = {}'.format(epoch_sample_cfg.get('save_clean', epoch_sample_cfg.get('use_postprocess', True))))
+        self.logger.info('[Config] best_metric = {}'.format(epoch_sample_cfg.get('best_metric', 'avg_clean_dice')))
+        self.logger.info('[Config] best_log_name = {}'.format(epoch_sample_cfg.get('best_log_name', None)))
+        self.logger.info('[Config] over_generation_white_ratio = {}'.format(epoch_sample_cfg.get('over_generation_white_ratio', 1.5)))
+        self.logger.info('[Config] early_stop_patience = {}'.format(epoch_sample_cfg.get('early_stop_patience', None)))
         self.logger.info('[Config] min_component_area = {}'.format(epoch_sample_cfg.get('clean_min_area', epoch_sample_cfg.get('min_component_area', 20))))
         self.logger.info('[Config] clean_morphology = {}'.format(epoch_sample_cfg.get('clean_morphology', epoch_sample_cfg.get('morphology', 'open'))))
         self.logger.info('[Config] clean_close_kernels = {}'.format(epoch_sample_cfg.get('clean_close_kernels', [[3, 2], [5, 2], [7, 2]])))
         self.logger.info('[Config] target preprocessing mode = nearest_resize_strict_binary_gt')
+        finetune_cfg = self.opt['train'].get('finetune', {}) or {}
+        if finetune_cfg.get('enabled', False):
+            self.logger.info('[Finetune] Resume from v5 epoch30 checkpoint: {}'.format(self.opt['path'].get('resume_state')))
+            self.logger.info('[Finetune] Start epoch: {}'.format(self.epoch + 1))
+            self.logger.info('[Finetune] Postprocess: {}'.format('enabled' if epoch_sample_cfg.get('use_postprocess', True) else 'disabled'))
         if getattr(netG_for_log, 'aux_loss_enabled', False):
             self.logger.info('[Config] lambda_bce = {}'.format(netG_for_log.lambda_bce))
             self.logger.info('[Config] lambda_dice = {}'.format(netG_for_log.lambda_dice))
@@ -424,30 +450,34 @@ class Palette(BaseModel):
         generated_binary_rgb = np.repeat(generated_binary_gray[:, :, None], 3, axis=2)
 
         clean_variants = {}
-        for kernel_pair in self.epoch_sample_clean_close_kernels:
-            close_w, close_h = self._parse_kernel_size(kernel_pair, default=(5, 2))
-            label = 'close_{}x{}'.format(close_w, close_h)
-            clean_gray = self._clean_binary_uint8(
-                generated_binary_gray,
-                min_area=self.epoch_sample_clean_min_area,
-                kernel_size=self.epoch_sample_clean_kernel_size,
-                morphology='close_open_h',
-                close_kernel=(close_w, close_h)
-            )
-            clean_variants[label] = np.where(range_binary_gray > 0, clean_gray, 0).astype(np.uint8)
-        default_w, default_h = self._parse_kernel_size(self.epoch_sample_default_clean_close_kernel, default=(5, 2))
-        default_clean_label = 'close_{}x{}'.format(default_w, default_h)
-        if default_clean_label not in clean_variants:
-            clean_gray = self._clean_binary_uint8(
-                generated_binary_gray,
-                min_area=self.epoch_sample_clean_min_area,
-                kernel_size=self.epoch_sample_clean_kernel_size,
-                morphology='close_open_h',
-                close_kernel=(default_w, default_h)
-            )
-            clean_variants[default_clean_label] = np.where(range_binary_gray > 0, clean_gray, 0).astype(np.uint8)
-        generated_clean_gray = clean_variants[default_clean_label]
-        generated_clean_rgb = np.repeat(generated_clean_gray[:, :, None], 3, axis=2)
+        generated_clean_gray = None
+        generated_clean_rgb = None
+        default_clean_label = 'disabled'
+        if self.epoch_sample_save_clean:
+            for kernel_pair in self.epoch_sample_clean_close_kernels:
+                close_w, close_h = self._parse_kernel_size(kernel_pair, default=(5, 2))
+                label = 'close_{}x{}'.format(close_w, close_h)
+                clean_gray = self._clean_binary_uint8(
+                    generated_binary_gray,
+                    min_area=self.epoch_sample_clean_min_area,
+                    kernel_size=self.epoch_sample_clean_kernel_size,
+                    morphology='close_open_h',
+                    close_kernel=(close_w, close_h)
+                )
+                clean_variants[label] = np.where(range_binary_gray > 0, clean_gray, 0).astype(np.uint8)
+            default_w, default_h = self._parse_kernel_size(self.epoch_sample_default_clean_close_kernel, default=(5, 2))
+            default_clean_label = 'close_{}x{}'.format(default_w, default_h)
+            if default_clean_label not in clean_variants:
+                clean_gray = self._clean_binary_uint8(
+                    generated_binary_gray,
+                    min_area=self.epoch_sample_clean_min_area,
+                    kernel_size=self.epoch_sample_clean_kernel_size,
+                    morphology='close_open_h',
+                    close_kernel=(default_w, default_h)
+                )
+                clean_variants[default_clean_label] = np.where(range_binary_gray > 0, clean_gray, 0).astype(np.uint8)
+            generated_clean_gray = clean_variants[default_clean_label]
+            generated_clean_rgb = np.repeat(generated_clean_gray[:, :, None], 3, axis=2)
         target_rgb = self._gray_to_rgb_uint8(target01)
 
         os.makedirs(sample_dir, exist_ok=True)
@@ -458,20 +488,23 @@ class Palette(BaseModel):
         for label, binary_gray in threshold_binaries.items():
             binary_rgb = np.repeat(binary_gray[:, :, None], 3, axis=2)
             Image.fromarray(binary_rgb).save(os.path.join(sample_dir, 'generated_binary_{}.png'.format(label)))
-        Image.fromarray(generated_clean_rgb).save(os.path.join(sample_dir, 'generated_clean.png'))
-        for label, clean_gray in clean_variants.items():
-            clean_rgb = np.repeat(clean_gray[:, :, None], 3, axis=2)
-            Image.fromarray(clean_rgb).save(os.path.join(sample_dir, 'generated_clean_{}.png'.format(label)))
-            Image.fromarray(np.concatenate([input_rgb, clean_rgb, target_rgb], axis=1)).save(
-                os.path.join(sample_dir, 'compare_clean_{}.png'.format(label)))
         Image.fromarray(np.concatenate([input_rgb, generated_raw_rgb, target_rgb], axis=1)).save(
             os.path.join(sample_dir, 'compare_raw.png'))
         Image.fromarray(np.concatenate([input_rgb, generated_binary_rgb, target_rgb], axis=1)).save(
             os.path.join(sample_dir, 'compare_binary.png'))
-        Image.fromarray(np.concatenate([input_rgb, generated_clean_rgb, target_rgb], axis=1)).save(
-            os.path.join(sample_dir, 'compare_clean.png'))
-        Image.fromarray(np.concatenate([input_rgb, generated_raw_rgb, generated_binary_rgb, generated_clean_rgb, target_rgb], axis=1)).save(
-            os.path.join(sample_dir, 'compare_all.png'))
+        if self.epoch_sample_save_clean:
+            Image.fromarray(generated_clean_rgb).save(os.path.join(sample_dir, 'generated_clean.png'))
+            for label, clean_gray in clean_variants.items():
+                clean_rgb = np.repeat(clean_gray[:, :, None], 3, axis=2)
+                Image.fromarray(clean_rgb).save(os.path.join(sample_dir, 'generated_clean_{}.png'.format(label)))
+                Image.fromarray(np.concatenate([input_rgb, clean_rgb, target_rgb], axis=1)).save(
+                    os.path.join(sample_dir, 'compare_clean_{}.png'.format(label)))
+            Image.fromarray(np.concatenate([input_rgb, generated_clean_rgb, target_rgb], axis=1)).save(
+                os.path.join(sample_dir, 'compare_clean.png'))
+            compare_all = np.concatenate([input_rgb, generated_raw_rgb, generated_binary_rgb, generated_clean_rgb, target_rgb], axis=1)
+        else:
+            compare_all = np.concatenate([input_rgb, generated_raw_rgb, generated_binary_rgb, target_rgb], axis=1)
+        Image.fromarray(compare_all).save(os.path.join(sample_dir, 'compare_all.png'))
         Image.fromarray(generated_raw_rgb).save(os.path.join(sample_dir, 'generated.png'))
         Image.fromarray(np.concatenate([input_rgb, generated_raw_rgb, target_rgb], axis=1)).save(
             os.path.join(sample_dir, 'compare.png'))
@@ -494,12 +527,19 @@ class Palette(BaseModel):
             'target_connected_components': target_connected,
         }
         row.update(self._binary_metric_row('binary', generated_binary_gray, target01, range01))
-        row.update(self._binary_metric_row('clean', generated_clean_gray, target01, range01))
-        row['component_count_error'] = abs(row['clean_connected_components'] - target_connected)
-        row['max_component_area_ratio'] = row['clean_max_component_area_ratio']
-        row['outside_violation'] = row['clean_outside_violation']
-        row['hole_pixels'] = row['clean_hole_pixels']
-        row['num_holes'] = row['clean_num_holes']
+        if self.epoch_sample_save_clean and generated_clean_gray is not None:
+            row.update(self._binary_metric_row('clean', generated_clean_gray, target01, range01))
+            row['component_count_error'] = abs(row['clean_connected_components'] - target_connected)
+            row['max_component_area_ratio'] = row['clean_max_component_area_ratio']
+            row['outside_violation'] = row['clean_outside_violation']
+            row['hole_pixels'] = row['clean_hole_pixels']
+            row['num_holes'] = row['clean_num_holes']
+        else:
+            row['component_count_error'] = abs(row['binary_connected_components'] - target_connected)
+            row['max_component_area_ratio'] = row['binary_max_component_area_ratio']
+            row['outside_violation'] = row['binary_outside_violation']
+            row['hole_pixels'] = row['binary_hole_pixels']
+            row['num_holes'] = row['binary_num_holes']
         return row
 
     def _write_epoch_sample_metrics(self, rows, metrics_dir):
@@ -538,13 +578,22 @@ class Palette(BaseModel):
         score = float(overview[metric])
         is_better = self.best_epoch_sample_score is None
         if not is_better:
+            delta = float(getattr(self, 'epoch_sample_early_stop_min_delta', 0.0))
             if self.epoch_sample_best_mode == 'min':
-                is_better = score < self.best_epoch_sample_score
+                is_better = score < (self.best_epoch_sample_score - delta)
             else:
-                is_better = score > self.best_epoch_sample_score
+                is_better = score > (self.best_epoch_sample_score + delta)
         if not is_better:
+            if self.epoch_sample_early_stop_patience is not None:
+                self.epoch_sample_no_improve_count += 1
+                self.logger.info('[EarlyStop] No improvement on {} for {}/{} evaluations.'.format(
+                    metric, self.epoch_sample_no_improve_count, self.epoch_sample_early_stop_patience))
+                if self.epoch_sample_no_improve_count >= self.epoch_sample_early_stop_patience:
+                    self.request_stop_training = True
+                    self.logger.info('[EarlyStop] Stop requested at epoch {}.'.format(self.epoch))
             return
 
+        self.epoch_sample_no_improve_count = 0
         self.best_epoch_sample_score = score
         checkpoint_dir = self.opt['path']['checkpoint']
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -557,7 +606,12 @@ class Palette(BaseModel):
             f.write('best_epoch={}\n'.format(self.epoch))
             f.write('best_{}={}\n'.format(metric, score))
             f.write('best_checkpoint_path={}\n'.format(best_model_path))
-        self.logger.info('[Best] New best model at epoch {}, {} = {:.6f}'.format(self.epoch, metric, score))
+            f.write('postprocess={}\n'.format('enabled' if self.epoch_sample_save_clean else 'disabled'))
+        if (self.opt['train'].get('finetune', {}) or {}).get('enabled', False):
+            self.logger.info('[Best] New best finetune model at epoch {}, {} = {:.6f}'.format(self.epoch, metric, score))
+        else:
+            best_name = self.epoch_sample_best_log_name or 'model'
+            self.logger.info('[Best] New best {} at epoch {}, {} = {:.6f}'.format(best_name, self.epoch, metric, score))
 
     def _run_epoch_sample(self):
         if not self.epoch_sample_enabled or not self.epoch_sample_pairs:
@@ -585,6 +639,15 @@ class Palette(BaseModel):
         self.netG.train(was_training)
 
         overview = self._write_epoch_sample_metrics(rows, metrics_dir)
+        if overview:
+            target_white = float(overview.get('avg_target_white_pixels', 0.0))
+            binary_white = float(overview.get('avg_binary_white_pixels', 0.0))
+            if target_white > 0 and binary_white > self.epoch_sample_over_generation_white_ratio * target_white:
+                self.logger.warning('[Warning] possible over-generation at epoch {}: avg_binary_white_pixels is {:.2f}x target.'.format(self.epoch, binary_white / target_white))
+            if float(overview.get('avg_binary_precision', 1.0)) < 0.5:
+                self.logger.warning('[Monitor] avg_binary_precision is low: {:.6f}'.format(float(overview.get('avg_binary_precision', 0.0))))
+            if float(overview.get('avg_binary_bcr_error', 0.0)) > 0.2:
+                self.logger.warning('[Monitor] avg_binary_bcr_error is high: {:.6f}'.format(float(overview.get('avg_binary_bcr_error', 0.0))))
         self._maybe_update_epoch_sample_best(overview)
         self.logger.info('[Monitor] Epoch {} saved {} sample(s) to: {}'.format(
             self.epoch, len(rows), metrics_dir))
